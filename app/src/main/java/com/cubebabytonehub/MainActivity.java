@@ -1,190 +1,226 @@
 package com.cubebabytonehub;
 
 import android.app.Activity;
-import android.app.PendingIntent;
-import android.content.*;
-import android.hardware.usb.*;
+import android.content.Context;
+import android.media.midi.MidiDevice;
 import android.media.midi.MidiDeviceInfo;
 import android.media.midi.MidiManager;
-import android.os.Build;
+import android.media.midi.MidiOutputPort;
+import android.media.midi.MidiReceiver;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.ViewGroup;
-import android.widget.*;
-import java.util.HashMap;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import java.io.IOException;
 
 public class MainActivity extends Activity {
-    private static final String ACTION = "com.cubebabytonehub.USB_PERMISSION";
-    private UsbManager usb;
-    private MidiManager midi;
-    private TextView output;
+private MidiManager midi;
+private TextView output;
+private MidiDevice openedDevice;
+private MidiOutputPort receivePort;
+private final Handler mainHandler = new Handler(Looper.getMainLooper());
+private int receivedCount = 0;
 
-    private final BroadcastReceiver receiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) {
-            if (ACTION.equals(intent.getAction())) {
-                boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
-                output.append(granted ? "\nUSB permission granted." : "\nUSB permission denied.");
-                if (granted) scanUsb();
-            }
-        }
-    };
+@Override
+public void onCreate(Bundle state) {
+    super.onCreate(state);
+    midi = (MidiManager) getSystemService(Context.MIDI_SERVICE);
 
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);
-        usb = (UsbManager) getSystemService(USB_SERVICE);
-        midi = (MidiManager) getSystemService(MIDI_SERVICE);
+    LinearLayout layout = new LinearLayout(this);
+    layout.setOrientation(LinearLayout.VERTICAL);
 
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int) (18 * getResources().getDisplayMetrics().density);
-        layout.setPadding(pad, pad, pad, pad);
+    int pad = (int) (18 * getResources().getDisplayMetrics().density);
+    layout.setPadding(pad, pad, pad, pad);
 
-        TextView title = new TextView(this);
-        title.setText("CUBE BABY TONE HUB — STEP 12");
-        title.setTextSize(21);
-        layout.addView(title);
+    TextView title = new TextView(this);
+    title.setText("CUBE BABY TONE HUB - STEP 13");
+    title.setTextSize(21);
+    layout.addView(title);
 
-        TextView intro = new TextView(this);
-        intro.setText("\nUSB + Android MIDI detection. Connect the pedal using OTG.");
-        layout.addView(intro);
+    TextView intro = new TextView(this);
+    intro.setText("\nPassive MIDI Monitor. Connect CUBE BABY using OTG.");
+    layout.addView(intro);
 
-        Button scanUsbButton = new Button(this);
-        scanUsbButton.setText("SCAN USB INTERFACES");
-        layout.addView(scanUsbButton);
+    Button scanButton = new Button(this);
+    scanButton.setText("SCAN MIDI DEVICES");
+    layout.addView(scanButton);
 
-        Button scanMidiButton = new Button(this);
-        scanMidiButton.setText("SCAN ANDROID MIDI DEVICES");
-        layout.addView(scanMidiButton);
+    Button listenButton = new Button(this);
+    listenButton.setText("START LISTENING (MIDI IN)");
+    layout.addView(listenButton);
 
-        ScrollView scroll = new ScrollView(this);
-        output = new TextView(this);
-        output.setText("\nReady. Connect CUBE BABY, then scan.");
-        output.setTextSize(14);
-        output.setTextIsSelectable(true);
-        scroll.addView(output);
-        layout.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+    Button stopButton = new Button(this);
+    stopButton.setText("STOP LISTENING");
+    layout.addView(stopButton);
 
-        TextView note = new TextView(this);
-        note.setText("\nStep 12 only checks USB descriptors and Android MIDI recognition. " +
-                "It does not send MIDI messages, read/write presets, or change pedal settings.");
-        layout.addView(note);
-        setContentView(layout);
+    ScrollView scroll = new ScrollView(this);
+    output = new TextView(this);
+    output.setText("\nReady. Scan devices first.");
+    output.setTextSize(14);
+    output.setTextIsSelectable(true);
+    scroll.addView(output);
 
-        scanUsbButton.setOnClickListener(v -> scanUsb());
-        scanMidiButton.setOnClickListener(v -> scanAndroidMidi());
+    layout.addView(scroll,
+        new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            0, 1f
+        )
+    );
 
-        IntentFilter filter = new IntentFilter(ACTION);
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
-        else registerReceiver(receiver, filter);
+    TextView note = new TextView(this);
+    note.setText("\nThis step only listens for MIDI data FROM the pedal. It does not send commands or change presets.");
+    layout.addView(note);
+
+    setContentView(layout);
+
+    scanButton.setOnClickListener(v -> scanDevices());
+    listenButton.setOnClickListener(v -> startListening());
+    stopButton.setOnClickListener(v -> stopListening());
+}
+
+private void scanDevices() {
+    if (midi == null) {
+        output.setText("Android MIDI service unavailable.");
+        return;
     }
 
-    private void scanUsb() {
-        HashMap<String, UsbDevice> devices = usb.getDeviceList();
-        if (devices.isEmpty()) {
-            output.setText("USB SCAN\nNo USB device detected. Check OTG cable and connection.");
+    MidiDeviceInfo[] devices = midi.getDevices();
+    StringBuilder b = new StringBuilder();
+    b.append("MIDI DEVICES: ").append(devices.length).append("\n");
+
+    for (int i = 0; i < devices.length; i++) {
+        MidiDeviceInfo info = devices[i];
+
+        b.append("\nDevice ").append(i + 1)
+         .append(" | ID ").append(info.getId())
+         .append(" | Type ").append(info.getType())
+         .append("\nInput ports (phone to pedal): ")
+         .append(info.getInputPortCount())
+         .append("\nOutput ports (pedal to phone): ")
+         .append(info.getOutputPortCount()).append("\n");
+
+        String name = info.getProperties()
+            .getString(MidiDeviceInfo.PROPERTY_NAME);
+
+        String product = info.getProperties()
+            .getString(MidiDeviceInfo.PROPERTY_PRODUCT);
+
+        if (name != null) b.append("Name: ").append(name).append("\n");
+        if (product != null) b.append("Product: ").append(product).append("\n");
+    }
+
+    output.setText(b.toString());
+}
+
+private void startListening() {
+    if (midi == null) {
+        output.setText("Android MIDI service unavailable.");
+        return;
+    }
+
+    stopListening();
+
+    MidiDeviceInfo target = null;
+
+    for (MidiDeviceInfo info : midi.getDevices()) {
+        if (info.getType() == MidiDeviceInfo.TYPE_USB
+                && info.getOutputPortCount() > 0) {
+            target = info;
+            break;
+        }
+    }
+
+    if (target == null) {
+        output.append("\nNo USB MIDI device with output port found.");
+        return;
+    }
+
+    final MidiDeviceInfo selected = target;
+    output.append("\nOpening USB MIDI device ID " + selected.getId());
+
+    midi.openDevice(selected, device -> {
+        if (device == null) {
+            output.append("\nCould not open MIDI device.");
             return;
         }
-        StringBuilder text = new StringBuilder("USB SCAN\nFound ").append(devices.size()).append(" device(s)\n");
-        for (UsbDevice device : devices.values()) {
-            text.append("\n================================\nDEVICE: ").append(device.getDeviceName())
-                .append("\nVID: 0x").append(hex4(device.getVendorId()))
-                .append("\nPID: 0x").append(hex4(device.getProductId()))
-                .append("\nInterfaces: ").append(device.getInterfaceCount()).append("\n");
-            if (!usb.hasPermission(device)) {
-                requestUsbPermission(device);
-                text.append("USB permission: requesting...\n");
-                continue;
+
+        openedDevice = device;
+
+        try {
+            receivePort = openedDevice.openOutputPort(0);
+
+            if (receivePort == null) {
+                output.append("\nCould not open MIDI output port.");
+                stopListening();
+                return;
             }
-            text.append("USB permission: granted\n");
-            for (int i = 0; i < device.getInterfaceCount(); i++) {
-                UsbInterface intf = device.getInterface(i);
-                int cls = intf.getInterfaceClass();
-                int sub = intf.getInterfaceSubclass();
-                text.append("\nInterface ").append(i)
-                    .append(" | ID ").append(intf.getId())
-                    .append(" | Alt ").append(intf.getAlternateSetting())
-                    .append("\nClass/Subclass/Protocol: 0x").append(hex2(cls)).append(" / 0x")
-                    .append(hex2(sub)).append(" / 0x").append(hex2(intf.getInterfaceProtocol()))
-                    .append("\nEndpoints: ").append(intf.getEndpointCount());
-                if (cls == 0x01 && sub == 0x03) text.append("  [AUDIO / MIDI STREAMING CLASS]");
-                text.append("\n");
-                for (int e = 0; e < intf.getEndpointCount(); e++) {
-                    UsbEndpoint ep = intf.getEndpoint(e);
-                    text.append("  Endpoint ").append(e).append(": ")
-                        .append(hex2(ep.getAddress())).append(" | ")
-                        .append(ep.getDirection() == UsbConstants.USB_DIR_IN ? "IN" : "OUT")
-                        .append(" | ").append(typeName(ep.getType()))
-                        .append(" | packet ").append(ep.getMaxPacketSize())
-                        .append(" | interval ").append(ep.getInterval()).append("\n");
+
+            receivedCount = 0;
+
+            receivePort.connect(new MidiReceiver() {
+                @Override
+                public void onSend(
+                        byte[] data,
+                        int offset,
+                        int count,
+                        long timestamp) {
+
+                    final String line = formatBytes(data, offset, count);
+
+                    mainHandler.post(() -> {
+                        receivedCount++;
+                        output.append(
+                            "\nRX #" + receivedCount + "  " + line
+                        );
+                    });
                 }
-            }
+            });
+
+            output.append(
+                "\nLISTENING. Try normal pedal controls."
+            );
+
+        } catch (IOException | IllegalStateException e) {
+            output.append("\nMIDI error: " + e.getMessage());
+            stopListening();
         }
-        output.setText(text.toString());
+
+    }, mainHandler);
+}
+
+private String formatBytes(byte[] data, int offset, int count) {
+    StringBuilder b = new StringBuilder();
+
+    for (int i = 0; i < count; i++) {
+        if (i > 0) b.append(" ");
+        b.append(String.format("%02X", data[offset + i] & 0xFF));
     }
 
-    private void scanAndroidMidi() {
-        if (midi == null) {
-            output.setText("ANDROID MIDI SCAN\nMidiManager is not available on this Android device.");
-            return;
-        }
-        MidiDeviceInfo[] devices = midi.getDevices();
-        StringBuilder text = new StringBuilder("ANDROID MIDI SCAN\nDetected MIDI devices: ")
-                .append(devices.length).append("\n");
-        if (devices.length == 0) {
-            text.append("\nAndroid has not exposed any MIDI device currently.\n")
-                .append("This does not prove the pedal has no MIDI function. The USB interface may need a different driver or connection mode.");
-        }
-        for (int i = 0; i < devices.length; i++) {
-            MidiDeviceInfo info = devices[i];
-            text.append("\n--- MIDI DEVICE ").append(i + 1).append(" ---\n")
-                .append("ID: ").append(info.getId()).append("\n")
-                .append("Type: ").append(midiType(info.getType())).append("\n")
-                .append("Input ports (phone can send to device): ").append(info.getInputPortCount()).append("\n")
-                .append("Output ports (phone can receive from device): ").append(info.getOutputPortCount()).append("\n");
-            android.os.Bundle props = info.getProperties();
-            appendProperty(text, props, MidiDeviceInfo.PROPERTY_NAME, "Name");
-            appendProperty(text, props, MidiDeviceInfo.PROPERTY_MANUFACTURER, "Manufacturer");
-            appendProperty(text, props, MidiDeviceInfo.PROPERTY_PRODUCT, "Product");
-        }
-        text.append("\nNo MIDI messages were sent or received in this scan.");
-        output.setText(text.toString());
-    }
+    return b.length() == 0 ? "(empty packet)" : b.toString();
+}
 
-    private void appendProperty(StringBuilder text, android.os.Bundle props, String key, String label) {
-        String value = props.getString(key);
-        if (value != null && !value.isEmpty()) text.append(label).append(": ").append(value).append("\n");
-    }
+private void stopListening() {
+    try {
+        if (receivePort != null) receivePort.close();
+    } catch (IOException ignored) {}
 
-    private String midiType(int type) {
-        switch (type) {
-            case MidiDeviceInfo.TYPE_USB: return "USB";
-            case MidiDeviceInfo.TYPE_VIRTUAL: return "VIRTUAL";
-            case MidiDeviceInfo.TYPE_BLUETOOTH: return "BLUETOOTH";
-            default: return "OTHER (" + type + ")";
-        }
-    }
+    receivePort = null;
 
-    private void requestUsbPermission(UsbDevice device) {
-        Intent intent = new Intent(ACTION);
-        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (Build.VERSION.SDK_INT >= 23) flags |= PendingIntent.FLAG_IMMUTABLE;
-        PendingIntent pending = PendingIntent.getBroadcast(this, 0, intent, flags);
-        usb.requestPermission(device, pending);
-    }
+    try {
+        if (openedDevice != null) openedDevice.close();
+    } catch (IOException ignored) {}
 
-    private String typeName(int type) {
-        switch (type) {
-            case UsbConstants.USB_ENDPOINT_XFER_CONTROL: return "CONTROL";
-            case UsbConstants.USB_ENDPOINT_XFER_ISOC: return "ISOCHRONOUS";
-            case UsbConstants.USB_ENDPOINT_XFER_BULK: return "BULK";
-            case UsbConstants.USB_ENDPOINT_XFER_INT: return "INTERRUPT";
-            default: return "UNKNOWN";
-        }
-    }
-    private String hex2(int value) { return String.format("%02X", value & 0xFF); }
-    private String hex4(int value) { return String.format("%04X", value & 0xFFFF); }
+    openedDevice = null;
+}
 
-    @Override protected void onDestroy() {
-        super.onDestroy();
-        try { unregisterReceiver(receiver); } catch (Exception ignored) { }
-    }
+@Override
+protected void onDestroy() {
+    stopListening();
+    super.onDestroy();
+}
+
 }
