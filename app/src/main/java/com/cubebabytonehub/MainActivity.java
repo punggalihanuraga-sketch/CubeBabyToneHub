@@ -31,6 +31,7 @@ public class MainActivity extends Activity {
 
     private boolean receiving = false;
     private boolean waitingRead = false;
+    private boolean waitingWriteAck = false;
     private boolean presetsLoaded = false;
     private boolean updating = false;
     private boolean verifyingWrite = false;
@@ -71,6 +72,10 @@ public class MainActivity extends Activity {
 
         buildUI();
     }
+
+    // =====================================
+    // USER INTERFACE
+    // =====================================
 
     private void buildUI() {
 
@@ -288,6 +293,7 @@ public class MainActivity extends Activity {
             int value = presetData[position] & 255;
 
             sliders[i].setProgress(value);
+
             sliders[i].setEnabled(
                     presetsLoaded && !verifyingWrite);
 
@@ -296,6 +302,10 @@ public class MainActivity extends Activity {
 
         updating = false;
     }
+
+    // =====================================
+    // MIDI DEVICE
+    // =====================================
 
     private void scanDevices() {
 
@@ -392,6 +402,10 @@ public class MainActivity extends Activity {
         }, handler);
     }
 
+    // =====================================
+    // RECEIVE MIDI
+    // =====================================
+
     private void receiveMidi(
             byte[] data,
             int offset,
@@ -426,9 +440,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ==============================
+    // =====================================
     // READ PRESETS
-    // ==============================
+    // =====================================
 
     private void readPresets() {
 
@@ -437,8 +451,8 @@ public class MainActivity extends Activity {
             return;
         }
 
-        if (verifyingWrite) {
-            status.setText("WRITE VERIFICATION IN PROGRESS");
+        if (verifyingWrite || waitingRead) {
+            status.setText("PLEASE WAIT FOR CURRENT OPERATION");
             return;
         }
 
@@ -506,9 +520,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ==============================
-    // SAVE TO PEDAL
-    // ==============================
+    // =====================================
+    // SAVE ALL PRESETS
+    // =====================================
 
     private void confirmWrite() {
 
@@ -533,6 +547,7 @@ public class MainActivity extends Activity {
                         "This operation will write all three presets "
                         + "(A, B and C) to the pedal.\n\n"
                         + "Existing pedal presets will be overwritten.\n\n"
+                        + "Make sure you have created a backup.\n\n"
                         + "Continue?"
                 )
                 .setNegativeButton("CANCEL", null)
@@ -554,24 +569,17 @@ public class MainActivity extends Activity {
         expectedWriteData =
                 Arrays.copyOf(presetData, LENGTH);
 
-        /*
-         * Memory write content:
-         *
-         * Byte 0      : Memory number
-         * Byte 1-4    : Address LE32
-         * Byte 5-7    : Length LE24
-         * Byte 8-55   : 48 bytes preset data
-         */
-
         byte[] content = new byte[56];
 
         content[0] = (byte) MEMORY;
 
+        // Address 0
         content[1] = 0;
         content[2] = 0;
         content[3] = 0;
         content[4] = 0;
 
+        // Length 48 bytes
         content[5] = 48;
         content[6] = 0;
         content[7] = 0;
@@ -591,11 +599,13 @@ public class MainActivity extends Activity {
 
             verifyingWrite = true;
             waitingRead = false;
+            waitingWriteAck = true;
 
             updateEditor();
 
             status.setText(
-                    "SENDING 48 BYTES TO CUBE BABY..."
+                    "WRITING PRESET A / B / C...\n"
+                    + "WAITING FOR PEDAL ACK"
             );
 
             inputPort.send(
@@ -604,42 +614,29 @@ public class MainActivity extends Activity {
                     request.length
             );
 
-            status.setText(
-                    "WRITE COMMAND SENT. PREPARING VERIFICATION..."
-            );
-
             handler.postDelayed(() -> {
 
-                if (!verifyingWrite) return;
-
-                if (inputPort == null) {
-                    finishWrite("MIDI DISCONNECTED");
-                    return;
-                }
-
-                requestVerificationRead();
-
-            }, 1000);
-
-            handler.postDelayed(() -> {
-
-                if (verifyingWrite) {
+                if (verifyingWrite && waitingWriteAck) {
 
                     finishWrite(
-                            "VERIFICATION TIMEOUT. "
-                            + "PLEASE READ PRESETS MANUALLY."
+                            "WRITE ACK TIMEOUT.\n"
+                            + "PEDAL DID NOT CONFIRM THE WRITE."
                     );
                 }
 
-            }, 8000);
+            }, 5000);
 
         } catch (IOException e) {
 
             finishWrite(
-                    "WRITE SEND ERROR: " + e.getMessage()
+                    "WRITE ERROR: " + e.getMessage()
             );
         }
     }
+
+    // =====================================
+    // VERIFY WRITE
+    // =====================================
 
     private void requestVerificationRead() {
 
@@ -674,6 +671,18 @@ public class MainActivity extends Activity {
 
             }, 500);
 
+            handler.postDelayed(() -> {
+
+                if (verifyingWrite && waitingRead) {
+
+                    finishWrite(
+                            "VERIFICATION TIMEOUT.\n"
+                            + "PLEASE READ PRESETS MANUALLY."
+                    );
+                }
+
+            }, 5000);
+
         } catch (IOException e) {
 
             finishWrite(
@@ -686,6 +695,8 @@ public class MainActivity extends Activity {
 
         verifyingWrite = false;
         waitingRead = false;
+        waitingWriteAck = false;
+
         expectedWriteData = null;
 
         updateEditor();
@@ -693,9 +704,9 @@ public class MainActivity extends Activity {
         status.setText(message);
     }
 
-    // ==============================
+    // =====================================
     // MIDI ENVELOPE
-    // ==============================
+    // =====================================
 
     private byte[] encodeEnvelope(
             int messageType,
@@ -849,9 +860,9 @@ public class MainActivity extends Activity {
                 | (((long) data[offset + 3] & 255) << 24);
     }
 
-    // ==============================
+    // =====================================
     // PROCESS MIDI RESPONSE
-    // ==============================
+    // =====================================
 
     private void processResponse(byte[] sysex) {
 
@@ -893,6 +904,49 @@ public class MainActivity extends Activity {
             return;
         }
 
+        // WRITE ACK
+        if (messageType == 0x00) {
+
+            if (!verifyingWrite || !waitingWriteAck) {
+                return;
+            }
+
+            if (content.length < 1) {
+                finishWrite("INVALID WRITE ACK");
+                return;
+            }
+
+            int ackValue = content[0] & 255;
+
+            waitingWriteAck = false;
+
+            if (ackValue == 0) {
+
+                finishWrite(
+                        "PEDAL REJECTED WRITE COMMAND.\n"
+                        + "PRESET NOT VERIFIED."
+                );
+
+                return;
+            }
+
+            status.setText(
+                    "PEDAL ACK RECEIVED.\n"
+                    + "STARTING PRESET VERIFICATION..."
+            );
+
+            handler.postDelayed(() -> {
+
+                if (verifyingWrite) {
+                    requestVerificationRead();
+                }
+
+            }, 250);
+
+            return;
+        }
+
+        // MEMORY READ RESPONSE
         if (messageType != 0x23 || content.length < 8) {
             return;
         }
@@ -929,8 +983,8 @@ public class MainActivity extends Activity {
             if (matches) {
 
                 finishWrite(
-                        "SAVE SUCCESSFUL!\n"
-                        + "PRESET A / B / C VERIFIED."
+                        "SAVE VERIFIED!\n"
+                        + "PRESET A / B / C DATA MATCHES."
                 );
 
             } else {
@@ -956,9 +1010,9 @@ public class MainActivity extends Activity {
         );
     }
 
-    // ==============================
+    // =====================================
     // BACKUP
-    // ==============================
+    // =====================================
 
     private void saveBackup() {
 
@@ -984,14 +1038,14 @@ public class MainActivity extends Activity {
         );
     }
 
-    // ==============================
-    // RESTORE
-    // ==============================
+    // =====================================
+    // RESTORE BACKUP TO EDITOR
+    // =====================================
 
     private void openBackup() {
 
-        if (verifyingWrite) {
-            status.setText("PLEASE WAIT FOR WRITE VERIFICATION");
+        if (verifyingWrite || waitingRead) {
+            status.setText("PLEASE WAIT FOR CURRENT OPERATION");
             return;
         }
 
@@ -1096,15 +1150,17 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ==============================
+    // =====================================
     // DISCONNECT
-    // ==============================
+    // =====================================
 
     private void stopConnection() {
 
         waitingRead = false;
+        waitingWriteAck = false;
         receiving = false;
         verifyingWrite = false;
+
         expectedWriteData = null;
 
         if (outputPort != null) {
