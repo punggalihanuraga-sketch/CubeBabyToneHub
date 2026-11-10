@@ -2,225 +2,210 @@ package com.cubebabytonehub;
 
 import android.app.Activity;
 import android.content.Context;
-import android.media.midi.MidiDevice;
-import android.media.midi.MidiDeviceInfo;
-import android.media.midi.MidiManager;
-import android.media.midi.MidiOutputPort;
-import android.media.midi.MidiReceiver;
+import android.media.midi.*;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.TextView;
+import android.widget.*;
+
 import java.io.IOException;
 
 public class MainActivity extends Activity {
-private MidiManager midi;
-private TextView output;
-private MidiDevice openedDevice;
-private MidiOutputPort receivePort;
-private final Handler mainHandler = new Handler(Looper.getMainLooper());
-private int receivedCount = 0;
 
-@Override
-public void onCreate(Bundle state) {
-    super.onCreate(state);
-    midi = (MidiManager) getSystemService(Context.MIDI_SERVICE);
+    private MidiManager midiManager;
+    private MidiDevice midiDevice;
+    private MidiOutputPort outputPort;
+    private TextView result;
+    private Handler handler = new Handler(Looper.getMainLooper());
+    private int rxCount = 0;
 
-    LinearLayout layout = new LinearLayout(this);
-    layout.setOrientation(LinearLayout.VERTICAL);
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
 
-    int pad = (int) (18 * getResources().getDisplayMetrics().density);
-    layout.setPadding(pad, pad, pad, pad);
+        midiManager = (MidiManager)
+                getSystemService(Context.MIDI_SERVICE);
 
-    TextView title = new TextView(this);
-    title.setText("CUBE BABY TONE HUB - STEP 13");
-    title.setTextSize(21);
-    layout.addView(title);
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(25, 25, 25, 25);
 
-    TextView intro = new TextView(this);
-    intro.setText("\nPassive MIDI Monitor. Connect CUBE BABY using OTG.");
-    layout.addView(intro);
+        TextView title = new TextView(this);
+        title.setText("CUBE BABY TONE HUB - STEP 13");
+        title.setTextSize(21);
+        layout.addView(title);
 
-    Button scanButton = new Button(this);
-    scanButton.setText("SCAN MIDI DEVICES");
-    layout.addView(scanButton);
+        Button scan = new Button(this);
+        scan.setText("SCAN MIDI DEVICES");
+        layout.addView(scan);
 
-    Button listenButton = new Button(this);
-    listenButton.setText("START LISTENING (MIDI IN)");
-    layout.addView(listenButton);
+        Button start = new Button(this);
+        start.setText("START LISTENING (MIDI IN)");
+        layout.addView(start);
 
-    Button stopButton = new Button(this);
-    stopButton.setText("STOP LISTENING");
-    layout.addView(stopButton);
+        Button stop = new Button(this);
+        stop.setText("STOP LISTENING");
+        layout.addView(stop);
 
-    ScrollView scroll = new ScrollView(this);
-    output = new TextView(this);
-    output.setText("\nReady. Scan devices first.");
-    output.setTextSize(14);
-    output.setTextIsSelectable(true);
-    scroll.addView(output);
+        ScrollView scroll = new ScrollView(this);
 
-    layout.addView(scroll,
-        new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            0, 1f
-        )
-    );
+        result = new TextView(this);
+        result.setTextSize(15);
+        result.setText("Ready. Connect CUBE BABY.");
+        result.setTextIsSelectable(true);
 
-    TextView note = new TextView(this);
-    note.setText("\nThis step only listens for MIDI data FROM the pedal. It does not send commands or change presets.");
-    layout.addView(note);
+        scroll.addView(result);
 
-    setContentView(layout);
+        layout.addView(scroll,
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0, 1));
 
-    scanButton.setOnClickListener(v -> scanDevices());
-    listenButton.setOnClickListener(v -> startListening());
-    stopButton.setOnClickListener(v -> stopListening());
-}
+        setContentView(layout);
 
-private void scanDevices() {
-    if (midi == null) {
-        output.setText("Android MIDI service unavailable.");
-        return;
+        scan.setOnClickListener(v -> scanDevices());
+        start.setOnClickListener(v -> startListening());
+        stop.setOnClickListener(v -> stopListening());
     }
 
-    MidiDeviceInfo[] devices = midi.getDevices();
-    StringBuilder b = new StringBuilder();
-    b.append("MIDI DEVICES: ").append(devices.length).append("\n");
+    private void scanDevices() {
 
-    for (int i = 0; i < devices.length; i++) {
-        MidiDeviceInfo info = devices[i];
-
-        b.append("\nDevice ").append(i + 1)
-         .append(" | ID ").append(info.getId())
-         .append(" | Type ").append(info.getType())
-         .append("\nInput ports (phone to pedal): ")
-         .append(info.getInputPortCount())
-         .append("\nOutput ports (pedal to phone): ")
-         .append(info.getOutputPortCount()).append("\n");
-
-        String name = info.getProperties()
-            .getString(MidiDeviceInfo.PROPERTY_NAME);
-
-        String product = info.getProperties()
-            .getString(MidiDeviceInfo.PROPERTY_PRODUCT);
-
-        if (name != null) b.append("Name: ").append(name).append("\n");
-        if (product != null) b.append("Product: ").append(product).append("\n");
-    }
-
-    output.setText(b.toString());
-}
-
-private void startListening() {
-    if (midi == null) {
-        output.setText("Android MIDI service unavailable.");
-        return;
-    }
-
-    stopListening();
-
-    MidiDeviceInfo target = null;
-
-    for (MidiDeviceInfo info : midi.getDevices()) {
-        if (info.getType() == MidiDeviceInfo.TYPE_USB
-                && info.getOutputPortCount() > 0) {
-            target = info;
-            break;
-        }
-    }
-
-    if (target == null) {
-        output.append("\nNo USB MIDI device with output port found.");
-        return;
-    }
-
-    final MidiDeviceInfo selected = target;
-    output.append("\nOpening USB MIDI device ID " + selected.getId());
-
-    midi.openDevice(selected, device -> {
-        if (device == null) {
-            output.append("\nCould not open MIDI device.");
+        if (midiManager == null) {
+            result.setText("MIDI service unavailable.");
             return;
         }
 
-        openedDevice = device;
+        MidiDeviceInfo[] devices = midiManager.getDevices();
 
-        try {
-            receivePort = openedDevice.openOutputPort(0);
+        StringBuilder text = new StringBuilder();
 
-            if (receivePort == null) {
-                output.append("\nCould not open MIDI output port.");
-                stopListening();
+        text.append("MIDI DEVICES: ")
+                .append(devices.length).append("\n\n");
+
+        for (MidiDeviceInfo info : devices) {
+
+            text.append("Device ID: ")
+                    .append(info.getId()).append("\n");
+
+            text.append("Type: ")
+                    .append(info.getType()).append("\n");
+
+            text.append("MIDI IN: ")
+                    .append(info.getInputPortCount()).append("\n");
+
+            text.append("MIDI OUT: ")
+                    .append(info.getOutputPortCount()).append("\n\n");
+        }
+
+        result.setText(text.toString());
+    }
+
+    private void startListening() {
+
+        stopListening();
+
+        MidiDeviceInfo selected = null;
+
+        for (MidiDeviceInfo info : midiManager.getDevices()) {
+
+            if (info.getType() == MidiDeviceInfo.TYPE_USB
+                    && info.getOutputPortCount() > 0) {
+
+                selected = info;
+                break;
+            }
+        }
+
+        if (selected == null) {
+            result.append("\nUSB MIDI device not found.");
+            return;
+        }
+
+        result.append("\nOpening MIDI device...");
+
+        midiManager.openDevice(selected, device -> {
+
+            if (device == null) {
+                result.append("\nFailed to open device.");
                 return;
             }
 
-            receivedCount = 0;
+            midiDevice = device;
 
-            receivePort.connect(new MidiReceiver() {
-                @Override
-                public void onSend(
-                        byte[] data,
-                        int offset,
-                        int count,
-                        long timestamp) {
+            try {
 
-                    final String line = formatBytes(data, offset, count);
+                outputPort = midiDevice.openOutputPort(0);
 
-                    mainHandler.post(() -> {
-                        receivedCount++;
-                        output.append(
-                            "\nRX #" + receivedCount + "  " + line
-                        );
-                    });
+                if (outputPort == null) {
+                    result.append("\nMIDI port unavailable.");
+                    stopListening();
+                    return;
                 }
-            });
 
-            output.append(
-                "\nLISTENING. Try normal pedal controls."
-            );
+                rxCount = 0;
 
-        } catch (IOException | IllegalStateException e) {
-            output.append("\nMIDI error: " + e.getMessage());
-            stopListening();
-        }
+                outputPort.connect(new MidiReceiver() {
 
-    }, mainHandler);
-}
+                    @Override
+                    public void onSend(
+                            byte[] data,
+                            int offset,
+                            int count,
+                            long timestamp) {
 
-private String formatBytes(byte[] data, int offset, int count) {
-    StringBuilder b = new StringBuilder();
+                        StringBuilder hex = new StringBuilder();
 
-    for (int i = 0; i < count; i++) {
-        if (i > 0) b.append(" ");
-        b.append(String.format("%02X", data[offset + i] & 0xFF));
+                        for (int i = 0; i < count; i++) {
+
+                            hex.append(String.format(
+                                    "%02X ",
+                                    data[offset + i] & 0xFF));
+                        }
+
+                        handler.post(() -> {
+
+                            rxCount++;
+
+                            result.append(
+                                    "\nRX #" + rxCount + ": "
+                                            + hex.toString());
+                        });
+                    }
+                });
+
+                result.append(
+                        "\nLISTENING - Waiting for MIDI data...");
+
+            } catch (Exception e) {
+
+                result.append("\nERROR: " + e.getMessage());
+                stopListening();
+            }
+
+        }, handler);
     }
 
-    return b.length() == 0 ? "(empty packet)" : b.toString();
-}
+    private void stopListening() {
 
-private void stopListening() {
-    try {
-        if (receivePort != null) receivePort.close();
-    } catch (IOException ignored) {}
+        if (outputPort != null) {
+            try {
+                outputPort.close();
+            } catch (IOException ignored) {}
+            outputPort = null;
+        }
 
-    receivePort = null;
+        if (midiDevice != null) {
+            try {
+                midiDevice.close();
+            } catch (IOException ignored) {}
+            midiDevice = null;
+        }
+    }
 
-    try {
-        if (openedDevice != null) openedDevice.close();
-    } catch (IOException ignored) {}
-
-    openedDevice = null;
-}
-
-@Override
-protected void onDestroy() {
-    stopListening();
-    super.onDestroy();
-}
-
+    @Override
+    protected void onDestroy() {
+        stopListening();
+        super.onDestroy();
+    }
 }
