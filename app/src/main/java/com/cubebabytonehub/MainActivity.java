@@ -11,8 +11,8 @@ import android.view.ViewGroup;
 import android.widget.*;
 
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.io.InputStream;
+import java.io.IOException;
 import java.util.Arrays;
 
 public class MainActivity extends Activity {
@@ -22,22 +22,16 @@ public class MainActivity extends Activity {
     private MidiInputPort inputPort;
     private MidiOutputPort outputPort;
 
-    private TextView result;
-    private TextView presetTitle;
-
-    private LinearLayout editorLayout;
-    private LinearLayout rootLayout;
-
     private Handler handler = new Handler(Looper.getMainLooper());
-
     private ByteArrayOutputStream sysexBuffer =
             new ByteArrayOutputStream();
 
     private boolean receiving = false;
     private boolean waitingRead = false;
+    private boolean presetsLoaded = false;
+    private boolean updating = false;
 
     private static final int MEMORY = 5;
-    private static final int ADDRESS = 0;
     private static final int LENGTH = 48;
 
     private static final int CREATE_BACKUP = 1001;
@@ -45,30 +39,23 @@ public class MainActivity extends Activity {
 
     private byte[] presetData = new byte[48];
 
-    private boolean presetsLoaded = false;
-    private boolean updatingSliders = false;
-
     private int selectedPreset = 0;
 
     private final String[] presetNames = {"A", "B", "C"};
 
     private final String[] parameterNames = {
-            "Gain",
-            "Tone",
-            "Reverb",
-            "Feedback",
-            "Volume",
-            "Time",
-            "Mix",
-            "Modulation"
+            "Gain", "Tone", "Reverb", "Feedback",
+            "Volume", "Time", "Mix", "Modulation"
     };
 
-    private final int[] parameterOffsets = {
+    private final int[] offsets = {
             1, 2, 3, 4, 5, 6, 7, 8
     };
 
     private SeekBar[] sliders = new SeekBar[8];
     private TextView[] values = new TextView[8];
+
+    private TextView status;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -77,42 +64,47 @@ public class MainActivity extends Activity {
         midiManager = (MidiManager)
                 getSystemService(Context.MIDI_SERVICE);
 
-        buildInterface();
+        buildUI();
     }
 
-    private void buildInterface() {
+    private void buildUI() {
 
-        rootLayout = new LinearLayout(this);
-        rootLayout.setOrientation(LinearLayout.VERTICAL);
-        rootLayout.setPadding(18, 18, 18, 18);
+        ScrollView scroll = new ScrollView(this);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(20, 15, 20, 20);
+
+        scroll.addView(root);
 
         TextView title = new TextView(this);
         title.setText("CUBE BABY TONE HUB");
-        title.setTextSize(23);
-        title.setPadding(0, 0, 0, 12);
-        rootLayout.addView(title);
+        title.setTextSize(25);
+        root.addView(title);
 
-        Button scan = makeButton("SCAN MIDI DEVICES");
-        Button connect = makeButton("CONNECT CUBE BABY");
-        Button read = makeButton("READ PRESET A / B / C");
-        Button disconnect = makeButton("DISCONNECT");
+        TextView subtitle = new TextView(this);
+        subtitle.setText("USB MIDI PRESET EDITOR");
+        subtitle.setTextSize(13);
+        root.addView(subtitle);
 
-        rootLayout.addView(scan);
-        rootLayout.addView(connect);
-        rootLayout.addView(read);
-        rootLayout.addView(disconnect);
+        addButton(root, "SCAN MIDI DEVICES",
+                v -> scanDevices());
 
-        scan.setOnClickListener(v -> scanDevices());
-        connect.setOnClickListener(v -> connectMidi());
-        read.setOnClickListener(v -> readPresets());
-        disconnect.setOnClickListener(v -> stopConnection());
+        addButton(root, "CONNECT CUBE BABY",
+                v -> connectMidi());
 
-        addDivider();
+        addButton(root, "READ PRESET A / B / C",
+                v -> readPresets());
 
-        TextView editorHeading = new TextView(this);
-        editorHeading.setText("PRESET EDITOR");
-        editorHeading.setTextSize(20);
-        rootLayout.addView(editorHeading);
+        addButton(root, "DISCONNECT",
+                v -> stopConnection());
+
+        addDivider(root);
+
+        TextView editorTitle = new TextView(this);
+        editorTitle.setText("PRESET EDITOR");
+        editorTitle.setTextSize(21);
+        root.addView(editorTitle);
 
         LinearLayout presetButtons = new LinearLayout(this);
         presetButtons.setOrientation(LinearLayout.HORIZONTAL);
@@ -131,179 +123,152 @@ public class MainActivity extends Activity {
                             1
                     ));
 
-            button.setOnClickListener(v -> selectPreset(index));
+            button.setOnClickListener(v -> {
+                selectedPreset = index;
+                updateEditor();
+            });
         }
 
-        rootLayout.addView(presetButtons);
+        root.addView(presetButtons);
 
-        presetTitle = new TextView(this);
-        presetTitle.setText("PRESET A");
-        presetTitle.setTextSize(18);
-        presetTitle.setPadding(0, 12, 0, 8);
-        rootLayout.addView(presetTitle);
-
-        editorLayout = new LinearLayout(this);
-        editorLayout.setOrientation(LinearLayout.VERTICAL);
+        TextView selected = new TextView(this);
+        selected.setTextSize(20);
+        selected.setPadding(0, 15, 0, 5);
+        selected.setText("PRESET A");
+        root.addView(selected);
 
         for (int i = 0; i < 8; i++) {
-            createSlider(i);
+
+            final int index = i;
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(0, 8, 0, 8);
+
+            LinearLayout header = new LinearLayout(this);
+
+            TextView name = new TextView(this);
+            name.setText(parameterNames[i]);
+            name.setTextSize(16);
+
+            values[i] = new TextView(this);
+            values[i].setText("0");
+            values[i].setTextSize(16);
+
+            header.addView(name,
+                    new LinearLayout.LayoutParams(
+                            0,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            1
+                    ));
+
+            header.addView(values[i]);
+
+            row.addView(header);
+
+            sliders[i] = new SeekBar(this);
+            sliders[i].setMax(127);
+
+            sliders[i].setOnSeekBarChangeListener(
+                    new SeekBar.OnSeekBarChangeListener() {
+
+                @Override
+                public void onProgressChanged(
+                        SeekBar bar,
+                        int progress,
+                        boolean fromUser) {
+
+                    values[index].setText(
+                            String.valueOf(progress));
+
+                    if (fromUser && presetsLoaded && !updating) {
+
+                        int position =
+                                selectedPreset * 16 + offsets[index];
+
+                        presetData[position] = (byte) progress;
+                    }
+                }
+
+                @Override
+                public void onStartTrackingTouch(SeekBar bar) {}
+
+                @Override
+                public void onStopTrackingTouch(SeekBar bar) {}
+            });
+
+            row.addView(sliders[i]);
+            root.addView(row);
         }
 
-        rootLayout.addView(editorLayout);
+        addDivider(root);
 
-        Button backup = makeButton("BACKUP PRESETS");
-        Button restore = makeButton("RESTORE BACKUP");
+        TextView backupTitle = new TextView(this);
+        backupTitle.setText("BACKUP & RESTORE");
+        backupTitle.setTextSize(21);
+        root.addView(backupTitle);
 
-        rootLayout.addView(backup);
-        rootLayout.addView(restore);
+        addButton(root, "BACKUP PRESETS",
+                v -> saveBackup());
 
-        backup.setOnClickListener(v -> saveBackup());
-        restore.setOnClickListener(v -> openBackup());
+        addButton(root, "RESTORE BACKUP",
+                v -> openBackup());
 
-        addDivider();
+        addDivider(root);
 
-        TextView logTitle = new TextView(this);
-        logTitle.setText("MIDI STATUS / INFORMATION");
-        logTitle.setTextSize(17);
-        rootLayout.addView(logTitle);
+        TextView statusTitle = new TextView(this);
+        statusTitle.setText("MIDI STATUS");
+        statusTitle.setTextSize(18);
+        root.addView(statusTitle);
 
-        ScrollView scroll = new ScrollView(this);
+        status = new TextView(this);
+        status.setTextSize(13);
+        status.setText("CUBE BABY READY");
+        status.setPadding(0, 10, 0, 20);
 
-        result = new TextView(this);
-        result.setTextSize(13);
-        result.setTextIsSelectable(true);
-        result.setText("CUBE BABY TONE HUB READY");
+        root.addView(status);
 
-        scroll.addView(result);
-
-        rootLayout.addView(scroll,
-                new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        0,
-                        1
-                ));
-
-        setContentView(rootLayout);
+        setContentView(scroll);
 
         updateEditor();
     }
 
-    private Button makeButton(String text) {
+    private void addButton(
+            LinearLayout root,
+            String text,
+            android.view.View.OnClickListener listener) {
 
         Button button = new Button(this);
         button.setText(text);
-
-        return button;
+        root.addView(button);
+        button.setOnClickListener(listener);
     }
 
-    private void addDivider() {
-
-        TextView divider = new TextView(this);
-        divider.setText("------------------------------");
-        divider.setPadding(0, 8, 0, 8);
-
-        rootLayout.addView(divider);
-    }
-
-    private void createSlider(int index) {
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(0, 5, 0, 5);
-
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-
-        TextView name = new TextView(this);
-        name.setText(parameterNames[index]);
-        name.setTextSize(15);
-
-        values[index] = new TextView(this);
-        values[index].setText("0");
-        values[index].setTextSize(15);
-
-        header.addView(name,
-                new LinearLayout.LayoutParams(
-                        0,
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        1
-                ));
-
-        header.addView(values[index]);
-
-        row.addView(header);
-
-        sliders[index] = new SeekBar(this);
-        sliders[index].setMax(127);
-
-        final int position = index;
-
-        sliders[index].setOnSeekBarChangeListener(
-                new SeekBar.OnSeekBarChangeListener() {
-
-            @Override
-            public void onProgressChanged(
-                    SeekBar seekBar,
-                    int progress,
-                    boolean fromUser) {
-
-                values[position].setText(
-                        String.valueOf(progress)
-                );
-
-                if (fromUser && presetsLoaded
-                        && !updatingSliders) {
-
-                    int offset =
-                            selectedPreset * 16
-                            + parameterOffsets[position];
-
-                    presetData[offset] = (byte) progress;
-                }
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {}
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
-
-        row.addView(sliders[index]);
-        editorLayout.addView(row);
-    }
-
-    private void selectPreset(int index) {
-
-        selectedPreset = index;
-        updateEditor();
+    private void addDivider(LinearLayout root) {
+        TextView line = new TextView(this);
+        line.setText("------------------------------");
+        line.setPadding(0, 12, 0, 12);
+        root.addView(line);
     }
 
     private void updateEditor() {
 
-        if (presetTitle == null) return;
-
-        presetTitle.setText(
-                "PRESET " + presetNames[selectedPreset]
-        );
-
-        updatingSliders = true;
+        updating = true;
 
         for (int i = 0; i < 8; i++) {
 
-            int offset =
-                    selectedPreset * 16
-                    + parameterOffsets[i];
+            int position =
+                    selectedPreset * 16 + offsets[i];
 
-            int value = presetData[offset] & 0xFF;
+            int value = presetData[position] & 0xFF;
 
             sliders[i].setProgress(value);
-            values[i].setText(String.valueOf(value));
-
             sliders[i].setEnabled(presetsLoaded);
+
+            values[i].setText(String.valueOf(value));
         }
 
-        updatingSliders = false;
+        updating = false;
     }
 
     private void scanDevices() {
@@ -313,29 +278,20 @@ public class MainActivity extends Activity {
         StringBuilder text = new StringBuilder();
 
         text.append("MIDI DEVICES: ")
-                .append(devices.length)
-                .append("\n\n");
+                .append(devices.length);
 
         for (MidiDeviceInfo info : devices) {
 
-            text.append("ID: ")
-                    .append(info.getId())
-                    .append("\n");
-
-            text.append("TYPE: ")
-                    .append(info.getType())
-                    .append("\n");
-
-            text.append("INPUT: ")
-                    .append(info.getInputPortCount())
-                    .append("\n");
-
-            text.append("OUTPUT: ")
-                    .append(info.getOutputPortCount())
-                    .append("\n\n");
+            text.append("\nID: ").append(info.getId());
+            text.append("\nTYPE: ").append(info.getType());
+            text.append("\nINPUT: ")
+                    .append(info.getInputPortCount());
+            text.append("\nOUTPUT: ")
+                    .append(info.getOutputPortCount());
+            text.append("\n");
         }
 
-        result.setText(text.toString());
+        status.setText(text.toString());
     }
 
     private void connectMidi() {
@@ -356,16 +312,16 @@ public class MainActivity extends Activity {
         }
 
         if (selected == null) {
-            result.setText("USB MIDI DEVICE NOT FOUND");
+            status.setText("USB MIDI DEVICE NOT FOUND");
             return;
         }
 
-        result.setText("OPENING CUBE BABY...");
+        status.setText("OPENING CUBE BABY...");
 
         midiManager.openDevice(selected, device -> {
 
             if (device == null) {
-                result.append("\nOPEN DEVICE FAILED");
+                status.setText("OPEN DEVICE FAILED");
                 return;
             }
 
@@ -373,17 +329,14 @@ public class MainActivity extends Activity {
 
             try {
 
-                inputPort = midiDevice.openInputPort(0);
-                outputPort = midiDevice.openOutputPort(0);
+                inputPort = device.openInputPort(0);
+                outputPort = device.openOutputPort(0);
 
                 if (inputPort == null || outputPort == null) {
-                    result.append("\nMIDI PORT UNAVAILABLE");
+                    status.setText("MIDI PORT UNAVAILABLE");
                     stopConnection();
                     return;
                 }
-
-                receiving = false;
-                waitingRead = false;
 
                 outputPort.connect(new MidiReceiver() {
 
@@ -398,12 +351,11 @@ public class MainActivity extends Activity {
                     }
                 });
 
-                result.append("\nMIDI CONNECTED SUCCESSFULLY");
-                result.append("\nCUBE BABY READY");
+                status.setText("MIDI CONNECTED SUCCESSFULLY");
 
             } catch (Exception e) {
 
-                result.append("\nERROR: " + e.getMessage());
+                status.setText("ERROR: " + e.getMessage());
                 stopConnection();
             }
 
@@ -419,7 +371,7 @@ public class MainActivity extends Activity {
 
             for (int i = offset; i < offset + count; i++) {
 
-                int value = data[i] & 0xFF;
+                int value = data[i] & 255;
 
                 if (value == 0xF0) {
                     sysexBuffer.reset();
@@ -446,18 +398,14 @@ public class MainActivity extends Activity {
     private void readPresets() {
 
         if (inputPort == null) {
-            result.append("\nCONNECT CUBE BABY FIRST");
+            status.setText("CONNECT CUBE BABY FIRST");
             return;
         }
 
         waitingRead = true;
+        status.setText("READING PRESETS...");
 
-        result.append("\nSENDING IDENTITY REQUEST...");
-
-        byte[] identity = encodeEnvelope(
-                0x11,
-                new byte[0]
-        );
+        byte[] identity = encodeEnvelope(0x11, new byte[0]);
 
         try {
 
@@ -467,12 +415,10 @@ public class MainActivity extends Activity {
 
                 if (!waitingRead || inputPort == null) return;
 
-                result.append("\nSENDING PRESET READ REQUEST...");
-
-                byte[] content = new byte[] {
+                byte[] content = {
                         0x05,
-                        0x00, 0x00, 0x00, 0x00,
-                        0x30, 0x00, 0x00
+                        0, 0, 0, 0,
+                        0x30, 0, 0
                 };
 
                 byte[] request = encodeEnvelope(0x23, content);
@@ -481,22 +427,24 @@ public class MainActivity extends Activity {
                     inputPort.send(request, 0, request.length);
                 } catch (IOException e) {
                     waitingRead = false;
-                    result.append("\nSEND ERROR: " + e.getMessage());
+                    status.setText("SEND ERROR");
                 }
 
             }, 500);
 
             handler.postDelayed(() -> {
+
                 if (waitingRead) {
                     waitingRead = false;
-                    result.append("\nTIMEOUT: NO PRESET RESPONSE");
+                    status.setText("READ TIMEOUT");
                 }
+
             }, 4000);
 
         } catch (IOException e) {
 
             waitingRead = false;
-            result.append("\nERROR: " + e.getMessage());
+            status.setText("ERROR: " + e.getMessage());
         }
     }
 
@@ -504,32 +452,35 @@ public class MainActivity extends Activity {
             int messageType,
             byte[] content) {
 
-        ByteArrayOutputStream clear = new ByteArrayOutputStream();
+        ByteArrayOutputStream clear =
+                new ByteArrayOutputStream();
 
-        clear.write(0x00);
+        clear.write(0);
         clear.write(0x59);
         clear.write(messageType);
 
         int length = content.length;
 
-        clear.write(length & 0xFF);
-        clear.write((length >> 8) & 0xFF);
-        clear.write((length >> 16) & 0xFF);
+        clear.write(length & 255);
+        clear.write((length >> 8) & 255);
+        clear.write((length >> 16) & 255);
 
         for (byte b : content) {
-            clear.write(b & 0xFF);
+            clear.write(b & 255);
         }
 
         clear.write(checksum(content));
 
-        byte[] encoded = encodeSevenBit(clear.toByteArray());
+        byte[] encoded =
+                encodeSevenBit(clear.toByteArray());
 
-        ByteArrayOutputStream sysex = new ByteArrayOutputStream();
+        ByteArrayOutputStream sysex =
+                new ByteArrayOutputStream();
 
         sysex.write(0xF0);
 
         for (byte b : encoded) {
-            sysex.write(b & 0xFF);
+            sysex.write(b & 255);
         }
 
         sysex.write(0xF7);
@@ -542,10 +493,10 @@ public class MainActivity extends Activity {
         int sum = 0;
 
         for (byte b : data) {
-            sum = (sum + (b & 0xFF)) & 0xFF;
+            sum = (sum + (b & 255)) & 255;
         }
 
-        return (~sum) & 0xFF;
+        return (~sum) & 255;
     }
 
     private byte[] encodeSevenBit(byte[] source) {
@@ -559,13 +510,14 @@ public class MainActivity extends Activity {
         for (byte b : source) {
 
             accumulator |=
-                    ((long) (b & 0xFF)) << bitCount;
+                    ((long) (b & 255)) << bitCount;
 
             bitCount++;
 
             while (true) {
 
-                destination.write((int) (accumulator & 0x7F));
+                destination.write(
+                        (int) (accumulator & 127));
 
                 accumulator >>>= 7;
 
@@ -576,10 +528,12 @@ public class MainActivity extends Activity {
         }
 
         if (accumulator > 0) {
-            destination.write((int) (accumulator & 0x7F));
+            destination.write(
+                    (int) (accumulator & 127));
         }
 
-        int paddedLength = (source.length * 8 + 6) / 7;
+        int paddedLength =
+                (source.length * 8 + 6) / 7;
 
         while (destination.size() < paddedLength) {
             destination.write(0);
@@ -598,7 +552,7 @@ public class MainActivity extends Activity {
 
         for (byte b : source) {
 
-            int value = b & 0xFF;
+            int value = b & 255;
 
             int mask = bitCount == 0
                     ? 0
@@ -609,9 +563,9 @@ public class MainActivity extends Activity {
             if (bitCount > 0) {
 
                 destination.write(
-                        ((lastValue & 0x7F)
+                        ((lastValue & 127)
                                 | (accumulator << (8 - bitCount)))
-                                & 0xFF
+                                & 255
                 );
             }
 
@@ -628,25 +582,25 @@ public class MainActivity extends Activity {
 
     private int readUint24(byte[] data, int offset) {
 
-        return (data[offset] & 0xFF)
-                | ((data[offset + 1] & 0xFF) << 8)
-                | ((data[offset + 2] & 0xFF) << 16);
+        return (data[offset] & 255)
+                | ((data[offset + 1] & 255) << 8)
+                | ((data[offset + 2] & 255) << 16);
     }
 
     private long readUint32(byte[] data, int offset) {
 
-        return ((long) data[offset] & 0xFF)
-                | (((long) data[offset + 1] & 0xFF) << 8)
-                | (((long) data[offset + 2] & 0xFF) << 16)
-                | (((long) data[offset + 3] & 0xFF) << 24);
+        return ((long) data[offset] & 255)
+                | (((long) data[offset + 1] & 255) << 8)
+                | (((long) data[offset + 2] & 255) << 16)
+                | (((long) data[offset + 3] & 255) << 24);
     }
 
     private void processResponse(byte[] sysex) {
 
         if (sysex.length < 8) return;
 
-        if ((sysex[0] & 0xFF) != 0xF0
-                || (sysex[sysex.length - 1] & 0xFF) != 0xF7) {
+        if ((sysex[0] & 255) != 0xF0
+                || (sysex[sysex.length - 1] & 255) != 0xF7) {
             return;
         }
 
@@ -657,12 +611,12 @@ public class MainActivity extends Activity {
 
         if (clear.length < 7) return;
 
-        if ((clear[0] & 0xFF) != 0x00
-                || (clear[1] & 0xFF) != 0x59) {
+        if ((clear[0] & 255) != 0
+                || (clear[1] & 255) != 0x59) {
             return;
         }
 
-        int messageType = clear[2] & 0xFF;
+        int messageType = clear[2] & 255;
         int contentLength = readUint24(clear, 3);
 
         if (clear.length != 7 + contentLength) return;
@@ -670,16 +624,10 @@ public class MainActivity extends Activity {
         byte[] content = Arrays.copyOfRange(
                 clear, 6, 6 + contentLength);
 
-        int receivedChecksum =
-                clear[6 + contentLength] & 0xFF;
+        if ((clear[6 + contentLength] & 255)
+                != checksum(content)) {
 
-        if (receivedChecksum != checksum(content)) {
-            result.append("\nINVALID CHECKSUM");
-            return;
-        }
-
-        if (messageType == 0x11) {
-            result.append("\nIDENTITY RESPONSE RECEIVED");
+            status.setText("INVALID CHECKSUM");
             return;
         }
 
@@ -687,82 +635,50 @@ public class MainActivity extends Activity {
             return;
         }
 
-        int memory = content[0] & 0xFF;
+        int memory = content[0] & 255;
+
         long address = readUint32(content, 1);
+
         int length = readUint24(content, 5);
 
         byte[] data = Arrays.copyOfRange(
                 content, 8, content.length);
 
         if (memory != MEMORY
-                || address != ADDRESS
+                || address != 0
                 || length != LENGTH
                 || data.length != LENGTH) {
 
-            result.append("\nUNEXPECTED MEMORY RESPONSE");
+            status.setText("UNEXPECTED MEMORY RESPONSE");
             return;
         }
 
         waitingRead = false;
 
         presetData = Arrays.copyOf(data, data.length);
+
         presetsLoaded = true;
 
         updateEditor();
 
-        displayPresets(data);
-    }
-
-    private void displayPresets(byte[] data) {
-
-        StringBuilder text = new StringBuilder();
-
-        text.append("\n\nPRESET BANK READ SUCCESSFULLY\n");
-        text.append("EDITOR READY\n");
-
-        for (int slot = 0; slot < 3; slot++) {
-
-            text.append("\n========== PRESET ")
-                    .append(presetNames[slot])
-                    .append(" ==========\n");
-
-            int start = slot * 16;
-
-            for (int i = 0; i < 13; i++) {
-
-                text.append("PARAM ")
-                        .append(i)
-                        .append(": ")
-                        .append(data[start + i] & 0xFF)
-                        .append("\n");
-            }
-
-            text.append("RAW: ");
-
-            for (int i = 0; i < 16; i++) {
-
-                text.append(String.format(
-                        "%02X ",
-                        data[start + i] & 0xFF
-                ));
-            }
-
-            text.append("\n");
-        }
-
-        result.append(text.toString());
+        status.setText(
+                "PRESET A / B / C READ SUCCESSFULLY"
+        );
     }
 
     private void saveBackup() {
 
         if (!presetsLoaded) {
-            result.append("\nREAD PRESETS BEFORE BACKUP");
+            status.setText("READ PRESETS FIRST");
             return;
         }
 
-        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        Intent intent =
+                new Intent(Intent.ACTION_CREATE_DOCUMENT);
+
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("application/octet-stream");
+
         intent.putExtra(
                 Intent.EXTRA_TITLE,
                 "CubeBaby_Backup.cbth"
@@ -773,7 +689,9 @@ public class MainActivity extends Activity {
 
     private void openBackup() {
 
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        Intent intent =
+                new Intent(Intent.ACTION_OPEN_DOCUMENT);
+
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
 
@@ -792,9 +710,7 @@ public class MainActivity extends Activity {
                 data
         );
 
-        if (resultCode != RESULT_OK || data == null) {
-            return;
-        }
+        if (resultCode != RESULT_OK || data == null) return;
 
         try {
 
@@ -802,29 +718,27 @@ public class MainActivity extends Activity {
 
                 java.io.OutputStream stream =
                         getContentResolver().openOutputStream(
-                                data.getData()
-                        );
+                                data.getData());
 
                 if (stream == null) {
-                    result.append("\nBACKUP FAILED");
+                    status.setText("BACKUP FAILED");
                     return;
                 }
 
                 stream.write(presetData);
                 stream.close();
 
-                result.append("\nBACKUP SAVED SUCCESSFULLY");
+                status.setText("BACKUP SAVED SUCCESSFULLY");
             }
 
             if (requestCode == RESTORE_BACKUP) {
 
                 InputStream stream =
                         getContentResolver().openInputStream(
-                                data.getData()
-                        );
+                                data.getData());
 
                 if (stream == null) {
-                    result.append("\nRESTORE FAILED");
+                    status.setText("RESTORE FAILED");
                     return;
                 }
 
@@ -843,28 +757,21 @@ public class MainActivity extends Activity {
                 byte[] restored = buffer.toByteArray();
 
                 if (restored.length != 48) {
-                    result.append(
-                            "\nINVALID BACKUP FILE - EXPECTED 48 BYTES"
-                    );
+                    status.setText("INVALID BACKUP FILE");
                     return;
                 }
 
-                presetData = Arrays.copyOf(
-                        restored,
-                        restored.length
-                );
-
+                presetData = restored;
                 presetsLoaded = true;
 
                 updateEditor();
 
-                result.append("\nBACKUP RESTORED SUCCESSFULLY");
-                result.append("\nEDITOR DATA UPDATED");
+                status.setText("BACKUP RESTORED SUCCESSFULLY");
             }
 
         } catch (Exception e) {
 
-            result.append("\nFILE ERROR: " + e.getMessage());
+            status.setText("FILE ERROR: " + e.getMessage());
         }
     }
 
@@ -894,8 +801,8 @@ public class MainActivity extends Activity {
             midiDevice = null;
         }
 
-        if (result != null) {
-            result.setText("MIDI DISCONNECTED");
+        if (status != null) {
+            status.setText("MIDI DISCONNECTED");
         }
     }
 
