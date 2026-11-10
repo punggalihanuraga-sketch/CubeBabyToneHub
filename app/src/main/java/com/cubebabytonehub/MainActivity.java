@@ -1,6 +1,7 @@
 package com.cubebabytonehub;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.media.midi.*;
@@ -22,7 +23,9 @@ public class MainActivity extends Activity {
     private MidiInputPort inputPort;
     private MidiOutputPort outputPort;
 
-    private Handler handler = new Handler(Looper.getMainLooper());
+    private Handler handler =
+            new Handler(Looper.getMainLooper());
+
     private ByteArrayOutputStream sysexBuffer =
             new ByteArrayOutputStream();
 
@@ -30,6 +33,7 @@ public class MainActivity extends Activity {
     private boolean waitingRead = false;
     private boolean presetsLoaded = false;
     private boolean updating = false;
+    private boolean verifyingWrite = false;
 
     private static final int MEMORY = 5;
     private static final int LENGTH = 48;
@@ -37,7 +41,8 @@ public class MainActivity extends Activity {
     private static final int CREATE_BACKUP = 1001;
     private static final int RESTORE_BACKUP = 1002;
 
-    private byte[] presetData = new byte[48];
+    private byte[] presetData = new byte[LENGTH];
+    private byte[] expectedWriteData;
 
     private int selectedPreset = 0;
 
@@ -124,6 +129,9 @@ public class MainActivity extends Activity {
                     ));
 
             button.setOnClickListener(v -> {
+
+                if (verifyingWrite) return;
+
                 selectedPreset = index;
                 updateEditor();
             });
@@ -181,20 +189,26 @@ public class MainActivity extends Activity {
                     values[index].setText(
                             String.valueOf(progress));
 
-                    if (fromUser && presetsLoaded && !updating) {
+                    if (fromUser && presetsLoaded
+                            && !updating
+                            && !verifyingWrite) {
 
                         int position =
-                                selectedPreset * 16 + offsets[index];
+                                selectedPreset * 16
+                                        + offsets[index];
 
-                        presetData[position] = (byte) progress;
+                        presetData[position] =
+                                (byte) progress;
                     }
                 }
 
                 @Override
-                public void onStartTrackingTouch(SeekBar bar) {}
+                public void onStartTrackingTouch(
+                        SeekBar bar) {}
 
                 @Override
-                public void onStopTrackingTouch(SeekBar bar) {}
+                public void onStopTrackingTouch(
+                        SeekBar bar) {}
             });
 
             row.addView(sliders[i]);
@@ -213,6 +227,16 @@ public class MainActivity extends Activity {
 
         addButton(root, "RESTORE BACKUP",
                 v -> openBackup());
+
+        addDivider(root);
+
+        TextView saveTitle = new TextView(this);
+        saveTitle.setText("PEDAL MEMORY");
+        saveTitle.setTextSize(21);
+        root.addView(saveTitle);
+
+        addButton(root, "SAVE TO PEDAL A / B / C",
+                v -> confirmWrite());
 
         addDivider(root);
 
@@ -245,6 +269,7 @@ public class MainActivity extends Activity {
     }
 
     private void addDivider(LinearLayout root) {
+
         TextView line = new TextView(this);
         line.setText("------------------------------");
         line.setPadding(0, 12, 0, 12);
@@ -260,10 +285,11 @@ public class MainActivity extends Activity {
             int position =
                     selectedPreset * 16 + offsets[i];
 
-            int value = presetData[position] & 0xFF;
+            int value = presetData[position] & 255;
 
             sliders[i].setProgress(value);
-            sliders[i].setEnabled(presetsLoaded);
+            sliders[i].setEnabled(
+                    presetsLoaded && !verifyingWrite);
 
             values[i].setText(String.valueOf(value));
         }
@@ -284,10 +310,13 @@ public class MainActivity extends Activity {
 
             text.append("\nID: ").append(info.getId());
             text.append("\nTYPE: ").append(info.getType());
+
             text.append("\nINPUT: ")
                     .append(info.getInputPortCount());
+
             text.append("\nOUTPUT: ")
                     .append(info.getOutputPortCount());
+
             text.append("\n");
         }
 
@@ -333,6 +362,7 @@ public class MainActivity extends Activity {
                 outputPort = device.openOutputPort(0);
 
                 if (inputPort == null || outputPort == null) {
+
                     status.setText("MIDI PORT UNAVAILABLE");
                     stopConnection();
                     return;
@@ -386,7 +416,8 @@ public class MainActivity extends Activity {
 
                     receiving = false;
 
-                    byte[] message = sysexBuffer.toByteArray();
+                    byte[] message =
+                            sysexBuffer.toByteArray();
 
                     handler.post(() ->
                             processResponse(message));
@@ -395,6 +426,10 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ==============================
+    // READ PRESETS
+    // ==============================
+
     private void readPresets() {
 
         if (inputPort == null) {
@@ -402,33 +437,27 @@ public class MainActivity extends Activity {
             return;
         }
 
+        if (verifyingWrite) {
+            status.setText("WRITE VERIFICATION IN PROGRESS");
+            return;
+        }
+
         waitingRead = true;
         status.setText("READING PRESETS...");
 
-        byte[] identity = encodeEnvelope(0x11, new byte[0]);
+        byte[] identity =
+                encodeEnvelope(0x11, new byte[0]);
 
         try {
 
-            inputPort.send(identity, 0, identity.length);
+            inputPort.send(
+                    identity, 0, identity.length);
 
             handler.postDelayed(() -> {
 
                 if (!waitingRead || inputPort == null) return;
 
-                byte[] content = {
-                        0x05,
-                        0, 0, 0, 0,
-                        0x30, 0, 0
-                };
-
-                byte[] request = encodeEnvelope(0x23, content);
-
-                try {
-                    inputPort.send(request, 0, request.length);
-                } catch (IOException e) {
-                    waitingRead = false;
-                    status.setText("SEND ERROR");
-                }
+                sendReadRequest();
 
             }, 500);
 
@@ -439,7 +468,7 @@ public class MainActivity extends Activity {
                     status.setText("READ TIMEOUT");
                 }
 
-            }, 4000);
+            }, 5000);
 
         } catch (IOException e) {
 
@@ -447,6 +476,226 @@ public class MainActivity extends Activity {
             status.setText("ERROR: " + e.getMessage());
         }
     }
+
+    private void sendReadRequest() {
+
+        if (inputPort == null) {
+            status.setText("MIDI NOT CONNECTED");
+            waitingRead = false;
+            return;
+        }
+
+        byte[] content = {
+                0x05,
+                0, 0, 0, 0,
+                0x30, 0, 0
+        };
+
+        byte[] request =
+                encodeEnvelope(0x23, content);
+
+        try {
+
+            inputPort.send(
+                    request, 0, request.length);
+
+        } catch (IOException e) {
+
+            waitingRead = false;
+            status.setText("READ SEND ERROR");
+        }
+    }
+
+    // ==============================
+    // SAVE TO PEDAL
+    // ==============================
+
+    private void confirmWrite() {
+
+        if (inputPort == null) {
+            status.setText("CONNECT CUBE BABY FIRST");
+            return;
+        }
+
+        if (!presetsLoaded) {
+            status.setText("READ PRESETS FIRST");
+            return;
+        }
+
+        if (verifyingWrite || waitingRead) {
+            status.setText("PLEASE WAIT FOR CURRENT OPERATION");
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("SAVE TO CUBE BABY?")
+                .setMessage(
+                        "This operation will write all three presets "
+                        + "(A, B and C) to the pedal.\n\n"
+                        + "Existing pedal presets will be overwritten.\n\n"
+                        + "Continue?"
+                )
+                .setNegativeButton("CANCEL", null)
+                .setPositiveButton("SAVE", (dialog, which) -> {
+
+                    writePresetsToPedal();
+
+                })
+                .show();
+    }
+
+    private void writePresetsToPedal() {
+
+        if (inputPort == null || !presetsLoaded) {
+            status.setText("MIDI NOT READY");
+            return;
+        }
+
+        expectedWriteData =
+                Arrays.copyOf(presetData, LENGTH);
+
+        /*
+         * Memory write content:
+         *
+         * Byte 0      : Memory number
+         * Byte 1-4    : Address LE32
+         * Byte 5-7    : Length LE24
+         * Byte 8-55   : 48 bytes preset data
+         */
+
+        byte[] content = new byte[56];
+
+        content[0] = (byte) MEMORY;
+
+        content[1] = 0;
+        content[2] = 0;
+        content[3] = 0;
+        content[4] = 0;
+
+        content[5] = 48;
+        content[6] = 0;
+        content[7] = 0;
+
+        System.arraycopy(
+                expectedWriteData,
+                0,
+                content,
+                8,
+                LENGTH
+        );
+
+        byte[] request =
+                encodeEnvelope(0x22, content);
+
+        try {
+
+            verifyingWrite = true;
+            waitingRead = false;
+
+            updateEditor();
+
+            status.setText(
+                    "SENDING 48 BYTES TO CUBE BABY..."
+            );
+
+            inputPort.send(
+                    request,
+                    0,
+                    request.length
+            );
+
+            status.setText(
+                    "WRITE COMMAND SENT. PREPARING VERIFICATION..."
+            );
+
+            handler.postDelayed(() -> {
+
+                if (!verifyingWrite) return;
+
+                if (inputPort == null) {
+                    finishWrite("MIDI DISCONNECTED");
+                    return;
+                }
+
+                requestVerificationRead();
+
+            }, 1000);
+
+            handler.postDelayed(() -> {
+
+                if (verifyingWrite) {
+
+                    finishWrite(
+                            "VERIFICATION TIMEOUT. "
+                            + "PLEASE READ PRESETS MANUALLY."
+                    );
+                }
+
+            }, 8000);
+
+        } catch (IOException e) {
+
+            finishWrite(
+                    "WRITE SEND ERROR: " + e.getMessage()
+            );
+        }
+    }
+
+    private void requestVerificationRead() {
+
+        if (!verifyingWrite || inputPort == null) {
+            finishWrite("MIDI CONNECTION LOST");
+            return;
+        }
+
+        status.setText(
+                "VERIFYING: READING PRESETS FROM PEDAL..."
+        );
+
+        byte[] identity =
+                encodeEnvelope(0x11, new byte[0]);
+
+        try {
+
+            inputPort.send(
+                    identity,
+                    0,
+                    identity.length
+            );
+
+            handler.postDelayed(() -> {
+
+                if (!verifyingWrite || inputPort == null) {
+                    return;
+                }
+
+                waitingRead = true;
+                sendReadRequest();
+
+            }, 500);
+
+        } catch (IOException e) {
+
+            finishWrite(
+                    "VERIFY REQUEST ERROR: " + e.getMessage()
+            );
+        }
+    }
+
+    private void finishWrite(String message) {
+
+        verifyingWrite = false;
+        waitingRead = false;
+        expectedWriteData = null;
+
+        updateEditor();
+
+        status.setText(message);
+    }
+
+    // ==============================
+    // MIDI ENVELOPE
+    // ==============================
 
     private byte[] encodeEnvelope(
             int messageType,
@@ -564,7 +813,8 @@ public class MainActivity extends Activity {
 
                 destination.write(
                         ((lastValue & 127)
-                                | (accumulator << (8 - bitCount)))
+                                | (accumulator
+                                << (8 - bitCount)))
                                 & 255
                 );
             }
@@ -580,20 +830,28 @@ public class MainActivity extends Activity {
         return destination.toByteArray();
     }
 
-    private int readUint24(byte[] data, int offset) {
+    private int readUint24(
+            byte[] data,
+            int offset) {
 
         return (data[offset] & 255)
                 | ((data[offset + 1] & 255) << 8)
                 | ((data[offset + 2] & 255) << 16);
     }
 
-    private long readUint32(byte[] data, int offset) {
+    private long readUint32(
+            byte[] data,
+            int offset) {
 
         return ((long) data[offset] & 255)
                 | (((long) data[offset + 1] & 255) << 8)
                 | (((long) data[offset + 2] & 255) << 16)
                 | (((long) data[offset + 3] & 255) << 24);
     }
+
+    // ==============================
+    // PROCESS MIDI RESPONSE
+    // ==============================
 
     private void processResponse(byte[] sysex) {
 
@@ -617,9 +875,13 @@ public class MainActivity extends Activity {
         }
 
         int messageType = clear[2] & 255;
-        int contentLength = readUint24(clear, 3);
 
-        if (clear.length != 7 + contentLength) return;
+        int contentLength =
+                readUint24(clear, 3);
+
+        if (clear.length != 7 + contentLength) {
+            return;
+        }
 
         byte[] content = Arrays.copyOfRange(
                 clear, 6, 6 + contentLength);
@@ -655,7 +917,35 @@ public class MainActivity extends Activity {
 
         waitingRead = false;
 
-        presetData = Arrays.copyOf(data, data.length);
+        if (verifyingWrite) {
+
+            boolean matches =
+                    expectedWriteData != null
+                    && Arrays.equals(expectedWriteData, data);
+
+            presetData = Arrays.copyOf(data, LENGTH);
+            presetsLoaded = true;
+
+            if (matches) {
+
+                finishWrite(
+                        "SAVE SUCCESSFUL!\n"
+                        + "PRESET A / B / C VERIFIED."
+                );
+
+            } else {
+
+                finishWrite(
+                        "VERIFICATION FAILED!\n"
+                        + "PEDAL DATA DOES NOT MATCH."
+                );
+            }
+
+            updateEditor();
+            return;
+        }
+
+        presetData = Arrays.copyOf(data, LENGTH);
 
         presetsLoaded = true;
 
@@ -665,6 +955,10 @@ public class MainActivity extends Activity {
                 "PRESET A / B / C READ SUCCESSFULLY"
         );
     }
+
+    // ==============================
+    // BACKUP
+    // ==============================
 
     private void saveBackup() {
 
@@ -684,10 +978,22 @@ public class MainActivity extends Activity {
                 "CubeBaby_Backup.cbth"
         );
 
-        startActivityForResult(intent, CREATE_BACKUP);
+        startActivityForResult(
+                intent,
+                CREATE_BACKUP
+        );
     }
 
+    // ==============================
+    // RESTORE
+    // ==============================
+
     private void openBackup() {
+
+        if (verifyingWrite) {
+            status.setText("PLEASE WAIT FOR WRITE VERIFICATION");
+            return;
+        }
 
         Intent intent =
                 new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -695,7 +1001,10 @@ public class MainActivity extends Activity {
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
 
-        startActivityForResult(intent, RESTORE_BACKUP);
+        startActivityForResult(
+                intent,
+                RESTORE_BACKUP
+        );
     }
 
     @Override
@@ -710,94 +1019,118 @@ public class MainActivity extends Activity {
                 data
         );
 
-        if (resultCode != RESULT_OK || data == null) return;
+        if (resultCode != RESULT_OK || data == null) {
+            return;
+        }
 
         try {
 
             if (requestCode == CREATE_BACKUP) {
 
-                java.io.OutputStream stream =
+                try (java.io.OutputStream stream =
                         getContentResolver().openOutputStream(
-                                data.getData());
+                                data.getData())) {
 
-                if (stream == null) {
-                    status.setText("BACKUP FAILED");
-                    return;
+                    if (stream == null) {
+                        status.setText("BACKUP FAILED");
+                        return;
+                    }
+
+                    stream.write(presetData);
                 }
 
-                stream.write(presetData);
-                stream.close();
-
-                status.setText("BACKUP SAVED SUCCESSFULLY");
+                status.setText(
+                        "BACKUP SAVED SUCCESSFULLY"
+                );
             }
 
             if (requestCode == RESTORE_BACKUP) {
 
-                InputStream stream =
-                        getContentResolver().openInputStream(
-                                data.getData());
-
-                if (stream == null) {
-                    status.setText("RESTORE FAILED");
-                    return;
-                }
-
                 ByteArrayOutputStream buffer =
                         new ByteArrayOutputStream();
 
-                byte[] temp = new byte[1024];
-                int count;
+                try (InputStream stream =
+                        getContentResolver().openInputStream(
+                                data.getData())) {
 
-                while ((count = stream.read(temp)) != -1) {
-                    buffer.write(temp, 0, count);
+                    if (stream == null) {
+                        status.setText("RESTORE FAILED");
+                        return;
+                    }
+
+                    byte[] temp = new byte[1024];
+                    int count;
+
+                    while ((count = stream.read(temp)) != -1) {
+                        buffer.write(temp, 0, count);
+                    }
                 }
-
-                stream.close();
 
                 byte[] restored = buffer.toByteArray();
 
-                if (restored.length != 48) {
+                if (restored.length != LENGTH) {
                     status.setText("INVALID BACKUP FILE");
                     return;
                 }
 
-                presetData = restored;
+                presetData = Arrays.copyOf(
+                        restored,
+                        LENGTH
+                );
+
                 presetsLoaded = true;
 
                 updateEditor();
 
-                status.setText("BACKUP RESTORED SUCCESSFULLY");
+                status.setText(
+                        "BACKUP RESTORED TO EDITOR.\n"
+                        + "PRESS SAVE TO PEDAL TO SEND IT."
+                );
             }
 
         } catch (Exception e) {
 
-            status.setText("FILE ERROR: " + e.getMessage());
+            status.setText(
+                    "FILE ERROR: " + e.getMessage()
+            );
         }
     }
+
+    // ==============================
+    // DISCONNECT
+    // ==============================
 
     private void stopConnection() {
 
         waitingRead = false;
         receiving = false;
+        verifyingWrite = false;
+        expectedWriteData = null;
 
         if (outputPort != null) {
+
             try {
                 outputPort.close();
             } catch (IOException ignored) {}
+
             outputPort = null;
         }
 
         if (inputPort != null) {
+
             try {
                 inputPort.close();
             } catch (IOException ignored) {}
+
             inputPort = null;
         }
 
         if (midiDevice != null) {
+
             try {
                 midiDevice.close();
             } catch (IOException ignored) {}
+
             midiDevice = null;
         }
 
@@ -808,7 +1141,9 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+
         stopConnection();
+
         super.onDestroy();
     }
 }
